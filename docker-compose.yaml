@@ -50,3 +50,48 @@ services:
             local-kafka:
               properties:
                 bootstrap.servers: "kafka:9092"
+
+
+  connect:
+    image: debezium/connect:2.6
+    depends_on:
+      - kafka
+      - mysql-primary
+      - kafka-init
+    ports:
+      - "8083:8083"
+    environment:
+      BOOTSTRAP_SERVERS: "kafka:29092"
+      GROUP_ID: "1"
+      CONFIG_STORAGE_TOPIC: "connect-configs"
+      OFFSET_STORAGE_TOPIC: "connect-offsets"
+      STATUS_STORAGE_TOPIC: "connect-statuses"
+      KEY_CONVERTER: "org.apache.kafka.connect.json.JsonConverter"
+      VALUE_CONVERTER: "org.apache.kafka.connect.json.JsonConverter"
+      KEY_CONVERTER_SCHEMAS_ENABLE: "false"
+      VALUE_CONVERTER_SCHEMAS_ENABLE: "false"
+
+      REST_ADVERTISED_HOST_NAME: "connect"
+    volumes:
+      - ./connect/connectors:/connectors
+
+  connect-init:
+    image: curlimages/curl:8.10.1
+    depends_on:
+      - connect
+      - kafka-init
+    volumes:
+      - ./connect/connectors:/connectors:ro
+      - ./scripts:/scripts:ro
+    entrypoint: ["/bin/sh", "/scripts/register_connector.sh"]
+
+
+  kafka-init:
+    image: confluentinc/cp-kafka:7.6.1
+    depends_on:
+      - kafka
+    entrypoint: ["/bin/bash", "-c"]
+    command: [ "sleep 15 && kafka-topics --create --if-not-exists --topic globalmart.retail.products --bootstrap-server kafka:29092 --partitions 1 --replication-factor 1 && kafka-topics --bootstrap-server kafka:29092 --describe --topic globalmart.retail.products" ]
+    restart: "no"
+
+
