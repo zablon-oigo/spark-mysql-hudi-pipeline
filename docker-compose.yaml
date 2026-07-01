@@ -6,7 +6,7 @@ services:
     hostname: kafka
 
     networks:
-      demo-net:
+      - demo-net
 
     ports:
       - "9092:9092"
@@ -16,11 +16,14 @@ services:
       KAFKA_NODE_ID: 1
       KAFKA_PROCESS_ROLES: broker,controller
       KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+
       KAFKA_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093,PLAINTEXT_HOST://:29092
       KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,PLAINTEXT_HOST://localhost:29092
+
       KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
       KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
       KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
       KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
       KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
@@ -28,6 +31,7 @@ services:
 
     volumes:
       - kafka-data:/var/lib/kafka/data
+
 
   akhq:
     image: tchiotludo/akhq:0.25.0
@@ -38,7 +42,7 @@ services:
       - kafka
 
     networks:
-      cdc-net:
+      - demo-net
 
     ports:
       - "8087:8080"
@@ -52,65 +56,148 @@ services:
                 bootstrap.servers: "kafka:9092"
 
 
-  connect:
-    image: debezium/connect:2.6
-    depends_on:
-      - kafka
-      - mysql-primary
-      - kafka-init
+  mysql-primary:
+    image: mysql:8.0
+
+    networks:
+      - demo-net
+
+    command:
+      - --server-id=1
+      - --log-bin=mysql-bin
+      - --binlog-format=ROW
+      - --binlog-row-image=FULL
+      - --gtid-mode=ON
+      - --enforce-gtid-consistency=ON
+
     ports:
-      - "8083:8083"
+      - "3306:3306"
+
     environment:
-      BOOTSTRAP_SERVERS: "kafka:29092"
-      GROUP_ID: "1"
-      CONFIG_STORAGE_TOPIC: "connect-configs"
-      OFFSET_STORAGE_TOPIC: "connect-offsets"
-      STATUS_STORAGE_TOPIC: "connect-statuses"
-      KEY_CONVERTER: "org.apache.kafka.connect.json.JsonConverter"
-      VALUE_CONVERTER: "org.apache.kafka.connect.json.JsonConverter"
-      KEY_CONVERTER_SCHEMAS_ENABLE: "false"
-      VALUE_CONVERTER_SCHEMAS_ENABLE: "false"
+      MYSQL_ROOT_PASSWORD: rootpw
+      MYSQL_DATABASE: retail
+      MYSQL_USER: debezium
+      MYSQL_PASSWORD: dbz_password
 
-      REST_ADVERTISED_HOST_NAME: "connect"
     volumes:
-      - ./connect/connectors:/connectors
-
-  connect-init:
-    image: curlimages/curl:8.10.1
-    depends_on:
-      - connect
-      - kafka-init
-    volumes:
-      - ./connect/connectors:/connectors:ro
+      - ./mysql/init:/docker-entrypoint-initdb.d
       - ./scripts:/scripts:ro
-    entrypoint: ["/bin/sh", "/scripts/register_connector.sh"]
-
 
 
   kafka-init:
     image: confluentinc/cp-kafka:7.6.1
+
     depends_on:
       - kafka
+
+    networks:
+      - demo-net
+
     entrypoint: ["/bin/bash", "-c"]
-    command: [ "sleep 15 && kafka-topics --create --if-not-exists --topic globalmart.retail.products --bootstrap-server kafka:29092 --partitions 1 --replication-factor 1 && kafka-topics --bootstrap-server kafka:29092 --describe --topic globalmart.retail.products" ]
+
+    command:
+      - >
+        sleep 15 &&
+        kafka-topics
+        --create
+        --if-not-exists
+        --topic globalmart.retail.products
+        --bootstrap-server kafka:9092
+        --partitions 1
+        --replication-factor 1 &&
+        kafka-topics
+        --describe
+        --topic globalmart.retail.products
+        --bootstrap-server kafka:9092
+
     restart: "no"
 
+  connect:
+    image: debezium/connect:2.6
+
+    depends_on:
+      - kafka
+      - mysql-primary
+      - kafka-init
+
+    networks:
+      - demo-net
+
+    ports:
+      - "8083:8083"
+
+    environment:
+      BOOTSTRAP_SERVERS: "kafka:9092"
+      GROUP_ID: "1"
+
+      CONFIG_STORAGE_TOPIC: "connect-configs"
+      OFFSET_STORAGE_TOPIC: "connect-offsets"
+      STATUS_STORAGE_TOPIC: "connect-statuses"
+
+      KEY_CONVERTER: "org.apache.kafka.connect.json.JsonConverter"
+      VALUE_CONVERTER: "org.apache.kafka.connect.json.JsonConverter"
+
+      KEY_CONVERTER_SCHEMAS_ENABLE: "false"
+      VALUE_CONVERTER_SCHEMAS_ENABLE: "false"
+
+      REST_ADVERTISED_HOST_NAME: "connect"
+
+    volumes:
+      - ./connect/connectors:/connectors
+
+
+  connect-init:
+    image: curlimages/curl:8.10.1
+
+    depends_on:
+      - connect
+      - kafka-init
+
+    networks:
+      - demo-net
+
+    volumes:
+      - ./connect/connectors:/connectors:ro
+      - ./scripts:/scripts:ro
+
+    entrypoint: ["/bin/sh", "/scripts/register_connector.sh"]
 
   jupyter:
     build: .
+
     container_name: spark-notebook
+
     depends_on:
       - kafka
       - kafka-init
+
+    networks:
+      - demo-net
+
     ports:
       - "8888:8888"
+
     environment:
-      - JUPYTER_ENABLE_LAB=yes
-      - KAFKA_BOOTSTRAP=kafka:29092
-      - KAFKA_TOPIC=globalmart.retail.products
-      - HUDI_BASE_PATH=/data/hudi/products_hudi
-      - CHECKPOINT_PATH=/data/checkpoints/products
-    command: start-notebook.sh --ServerApp.token='' --ServerApp.password='' --ServerApp.allow_origin='*' --ServerApp.allow_remote_access=True
+      JUPYTER_ENABLE_LAB: "yes"
+      KAFKA_BOOTSTRAP: "kafka:9092"
+      KAFKA_TOPIC: "globalmart.retail.products"
+      HUDI_BASE_PATH: "/data/hudi/products_hudi"
+      CHECKPOINT_PATH: "/data/checkpoints/products"
+
+    command: >
+      start-notebook.sh
+      --ServerApp.token=''
+      --ServerApp.password=''
+      --ServerApp.allow_origin='*'
+      --ServerApp.allow_remote_access=True
+
     volumes:
       - ./notebooks:/home/work
       - ./data:/data
+
+
+networks:
+  demo-net:
+
+volumes:
+  kafka-data:
